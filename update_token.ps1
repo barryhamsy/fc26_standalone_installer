@@ -711,6 +711,10 @@ function Invoke-Fc27TokenApply {
 # yet patched. Idempotent - runs at most once per session.
 function Start-Fc27Patch {
     if ($script:PatchStarted) { return }
+    # IMPORTANT: only patch AFTER the game has generated its license on first
+    # launch. Extracting the crack earlier overwrites the files that create
+    # 16425884_sc.dlf, so wait until the .dlf exists.
+    if (-not [System.IO.File]::Exists($script:LicensePath)) { return }
     if (Test-Fc27HasConfigs $script:GameDir) { return }   # already patched
     if ([string]::IsNullOrWhiteSpace($script:GameDir) -or -not (Test-Path -LiteralPath $script:GameDir)) { return }  # game not installed yet
 
@@ -731,9 +735,9 @@ function Start-Fc27Patch {
     $script:PatchAsync = $ps.BeginInvoke()
 
     # Make the download unmistakable: full-window overlay with a live status.
-    if ($script:UI.PatchStatus) { $script:UI.PatchStatus.Text = 'Downloading patch files from GitHub...' }
+    if ($script:UI.PatchStatus) { $script:UI.PatchStatus.Text = 'Downloading patch files...' }
     if ($script:UI.PatchOverlay) { $script:UI.PatchOverlay.Visibility = 'Visible' }
-    Set-Fc27Banner 'info' 'Installing patch' 'Downloading the FC27 patch from GitHub...'
+    Set-Fc27Banner 'info' 'Installing patch' 'Downloading the FC27 patch files...'
     Set-Fc27Log 'Preparing patch files...' 'muted'
     if ($script:PatchTimer) { $script:PatchTimer.Start() }
 }
@@ -1080,7 +1084,7 @@ function Show-Gui {
             <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE896;" FontSize="26" Foreground="#66C0F4" VerticalAlignment="Center" Margin="0,0,12,0"/>
             <TextBlock Text="Installing FC27 patch" FontSize="19" FontWeight="Bold" Foreground="#EAF2F8" VerticalAlignment="Center"/>
           </StackPanel>
-          <TextBlock x:Name="PatchStatus" Text="Downloading patch files from GitHub..." FontSize="14" Foreground="#C7D5E0" TextWrapping="Wrap" Margin="0,16,0,14"/>
+          <TextBlock x:Name="PatchStatus" Text="Downloading patch files..." FontSize="14" Foreground="#C7D5E0" TextWrapping="Wrap" Margin="0,16,0,14"/>
           <ProgressBar x:Name="PatchBar" IsIndeterminate="True" Height="7" Foreground="#66C0F4" Background="#0E1620" BorderThickness="0"/>
           <TextBlock Text="This can take a few minutes on a slow connection - please keep this window open." FontSize="11" Foreground="#7E93A6" TextWrapping="Wrap" Margin="0,16,0,0"/>
         </StackPanel>
