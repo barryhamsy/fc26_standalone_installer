@@ -1082,7 +1082,7 @@ function Show-Gui {
           </StackPanel>
           <TextBlock x:Name="PatchStatus" Text="Downloading patch files from GitHub..." FontSize="14" Foreground="#C7D5E0" TextWrapping="Wrap" Margin="0,16,0,14"/>
           <ProgressBar x:Name="PatchBar" IsIndeterminate="True" Height="7" Foreground="#66C0F4" Background="#0E1620" BorderThickness="0"/>
-          <TextBlock Text="Downloading from github.com/barryhamsy/fc26_standalone_installer. This can take a few minutes on a slow connection - please keep this window open." FontSize="11" Foreground="#7E93A6" TextWrapping="Wrap" Margin="0,16,0,0"/>
+          <TextBlock Text="This can take a few minutes on a slow connection - please keep this window open." FontSize="11" Foreground="#7E93A6" TextWrapping="Wrap" Margin="0,16,0,0"/>
         </StackPanel>
       </Border>
     </Grid>
