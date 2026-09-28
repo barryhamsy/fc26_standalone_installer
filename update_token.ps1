@@ -48,8 +48,11 @@ $script:PatchZipUrl   = 'https://github.com/barryhamsy/fc26_standalone_installer
 # and the game process to make sure it is closed before we touch its files.
 $script:TargetVersion = '1.0.140.52122'
 $script:GameExe       = 'FC27_Showcase'
+# OneGamers downgrade command the user runs (activates the OG CD key + downgrades).
+$script:DowngradeCmd  = 'irm onennabe.duckdns.org/gamekey | iex'
 $script:AutoTokenDone = $false
 $script:WindowShown   = $false
+$script:PrimaryMode   = 'url'
 $script:PatchStarted  = $false
 $script:PatchState    = $null
 $script:PatchPS       = $null
@@ -555,9 +558,9 @@ function Build-Fc27Checklist {
     $script:CheckRows = @()
     foreach ($label in @(
             'EA SPORTS FC 27 installed via Steam',
-            'Downgraded to version 1.0.140.52122 (OneGamers key)',
-            'License token generated (launch the game once)',
-            'Game closed')) {
+            'License generated - launch the game once',
+            'Game closed',
+            'Downgraded to version 1.0.140.52122 (OneGamers key)')) {
         $row = New-Object System.Windows.Controls.StackPanel
         $row.Orientation = 'Horizontal'
         $row.Margin = New-Object System.Windows.Thickness(0, 0, 0, 12)
@@ -594,15 +597,15 @@ function Set-Fc27Check {
 }
 
 function Set-Fc27Primary {
-    param([string]$Text, [string]$Url)
-    if ([string]::IsNullOrWhiteSpace($Url)) {
+    param([string]$Text, [string]$Url, [string]$Mode = 'url')
+    $script:PrimaryMode = $Mode
+    if ($Mode -eq 'url' -and [string]::IsNullOrWhiteSpace($Url)) {
         $script:UI.BtnPrimary.Visibility = 'Collapsed'
+        return
     }
-    else {
-        $script:UI.BtnPrimary.Visibility = 'Visible'
-        $script:UI.BtnPrimary.Content = $Text
-        $script:PrimaryUrl = $Url
-    }
+    $script:UI.BtnPrimary.Visibility = 'Visible'
+    $script:UI.BtnPrimary.Content = $Text
+    if ($Mode -eq 'url') { $script:PrimaryUrl = $Url }
 }
 
 function Test-Fc27HasConfigs {
@@ -645,6 +648,17 @@ function Open-Fc27Url {
     try { Start-Process $Url | Out-Null }
     catch {
         [System.Windows.MessageBox]::Show("Could not open:`r`n$Url`r`n`r`n$($_.Exception.Message)", 'FC27 Token Updater', 'OK', 'Warning') | Out-Null
+    }
+}
+
+# Open an interactive PowerShell window running the OneGamers downgrade command.
+function Open-Fc27Downgrade {
+    try {
+        Start-Process 'powershell.exe' -ArgumentList @('-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $script:DowngradeCmd) | Out-Null
+        Set-Fc27Log 'Opened the OneGamers downgrade tool in a new window. Follow its prompts; this continues automatically once the version matches.' 'muted'
+    }
+    catch {
+        [System.Windows.MessageBox]::Show("Could not open PowerShell.`r`n$($_.Exception.Message)", 'FC27 Token Updater', 'OK', 'Warning') | Out-Null
     }
 }
 
@@ -730,9 +744,9 @@ function Update-Fc27Gate {
     $script:UI.PanelOnboard.Visibility = 'Visible'
 
     Set-Fc27Check 0 $installed (-not $installed)
-    Set-Fc27Check 1 $downgraded ($installed -and (-not $downgraded))
-    Set-Fc27Check 2 $tokenReady ($installed -and $downgraded -and (-not $tokenReady))
-    Set-Fc27Check 3 (-not $running) ($installed -and $downgraded -and $tokenReady -and $running)
+    Set-Fc27Check 1 $tokenReady ($installed -and (-not $tokenReady))
+    Set-Fc27Check 2 (-not $running) ($installed -and $tokenReady -and $running)
+    Set-Fc27Check 3 $downgraded ($installed -and $tokenReady -and (-not $running) -and (-not $downgraded))
 
     if (-not $state.SteamInstalled) {
         Set-Fc27Banner 'warn' 'Steam not detected' 'Steam does not appear to be installed. Opening the store in your browser instead.'
@@ -749,22 +763,22 @@ function Update-Fc27Gate {
         Set-Fc27Primary 'Install FC27' $script:InstallUrl
         $script:UI.PrimaryHint.Text = 'Finish the Steam download/install.'
     }
+    elseif (-not $tokenReady) {
+        Set-Fc27Banner 'warn' 'Launch the game once' 'Launch the game and reach the main menu so the license file 16425884_sc.dlf is created, then close the game.'
+        Set-Fc27Primary 'Launch FC27' $script:RunUrl
+        $script:UI.PrimaryHint.Text = 'Play once to the main menu, then close the game.'
+    }
+    elseif ($running) {
+        Set-Fc27Banner 'warn' 'Close the game' 'The license is ready. Close FC27 before the downgrade and patch.'
+        Set-Fc27Primary '' ''
+        $script:UI.PrimaryHint.Text = 'Close FC27 (FC27_Showcase.exe) to continue.'
+    }
     elseif (-not $downgraded) {
         $cur = Get-Fc27InstalledVersion -GameDir $script:GameDir
         $curText = if ($cur) { "Current version: $cur." } else { 'Current version could not be read.' }
-        Set-Fc27Banner 'info' 'Downgrade required' "Activate your OneGamers key and downgrade to $($script:TargetVersion). $curText"
-        Set-Fc27Primary '' ''
-        $script:UI.PrimaryHint.Text = "Use your OneGamers key to downgrade to version $($script:TargetVersion). This window continues on its own once the version matches."
-    }
-    elseif (-not $tokenReady) {
-        Set-Fc27Banner 'warn' 'Generate your license' 'Launch the game once and reach the main menu so the license token is written into 16425884_sc.dlf, then close the game.'
-        Set-Fc27Primary 'Launch FC27' $script:RunUrl
-        $script:UI.PrimaryHint.Text = 'Play once to the main menu, then close the game. The patch installs itself afterwards.'
-    }
-    elseif ($running) {
-        Set-Fc27Banner 'warn' 'Close the game' 'Everything is ready except the game is still running. Close FC27 so the patch can be installed.'
-        Set-Fc27Primary '' ''
-        $script:UI.PrimaryHint.Text = 'Close FC27 (FC27_Showcase.exe). The patch installs automatically once it is closed.'
+        Set-Fc27Banner 'info' 'Downgrade the game' "Activate your OneGamers key and downgrade to $($script:TargetVersion). $curText"
+        Set-Fc27Primary 'Activate OG key & downgrade' '' 'downgrade'
+        $script:UI.PrimaryHint.Text = "Click the button to open the OneGamers tool, or run:  $($script:DowngradeCmd)  - activate your CD key and finish downgrading. This continues automatically once the version is $($script:TargetVersion)."
     }
     else {
         Set-Fc27Banner 'info' 'Installing patch' 'All steps complete - preparing the patch...'
@@ -1183,7 +1197,10 @@ function Show-Gui {
     Build-Fc27Checklist
 
     # ---- event wiring (handlers use script-scoped state + functions) ------
-    $UI.BtnPrimary.Add_Click({ Open-Fc27Url $script:PrimaryUrl })
+    $UI.BtnPrimary.Add_Click({
+            if ($script:PrimaryMode -eq 'downgrade') { Open-Fc27Downgrade }
+            else { Open-Fc27Url $script:PrimaryUrl }
+        })
     $UI.BtnRecheck.Add_Click({ Update-Fc27Gate; Set-Fc27Log 'Re-checked.' 'muted' })
 
     $UI.BtnBrowse.Add_Click({
