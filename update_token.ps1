@@ -44,6 +44,10 @@ $script:ForcedGameDir = $null
 # ----- Patch installer (downloads the FC27 crack files, then UnRARs them) --
 # Branch zip of https://github.com/barryhamsy/fc26_standalone_installer (FC27_INSTALLER).
 $script:PatchZipUrl   = 'https://github.com/barryhamsy/fc26_standalone_installer/archive/refs/heads/FC27_INSTALLER.zip'
+# Required (downgraded) game version, read from __Installer\installerdata.xml,
+# and the game process to make sure it is closed before we touch its files.
+$script:TargetVersion = '1.0.140.52122'
+$script:GameExe       = 'FC27_Showcase'
 $script:AutoTokenDone = $false
 $script:WindowShown   = $false
 $script:PatchStarted  = $false
@@ -57,7 +61,7 @@ $script:PatchAsync    = $null
 # and UnRAR.exe under the Steam folder, then extracts the crack into the game
 # folder. Progress is reported through the synchronized $State hashtable.
 $script:PatchWorker = {
-    param($State, $GameDir, $SteamPath, $ZipUrl)
+    param($State, $GameDir, $SteamPath, $ZipUrl, $GameExe)
     try {
         $ProgressPreference = 'SilentlyContinue'
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
@@ -96,6 +100,12 @@ $script:PatchWorker = {
             }
         }
         if (-not $unrar) { throw 'UnRAR.exe was not found under the Steam folder.' }
+
+        # Final safety check: never extract over files the game still has open.
+        $State.Status = 'Checking the game is closed...'
+        if ($GameExe -and (Get-Process -Name $GameExe -ErrorAction SilentlyContinue)) {
+            throw 'The game is still running. Close FC27 and it will continue.'
+        }
 
         $State.Status = 'Extracting patch into game folder...'
         $dest = $GameDir
@@ -236,6 +246,39 @@ function Get-IniTokenValue {
     $text = [System.Text.Encoding]::GetEncoding(28591).GetString([System.IO.File]::ReadAllBytes($path))
     $m = [regex]::Match($text, '(?m)^[\t ﻿]*' + [regex]::Escape($Key) + '[\t ]*=[\t ]*(?<v>[^\r\n]*)$')
     if ($m.Success) { return $m.Groups['v'].Value.TrimEnd() } else { return $null }
+}
+
+# ----- Preconditions for patching -----------------------------------------
+# Installed game version, read from __Installer\installerdata.xml.
+function Get-Fc27InstalledVersion {
+    param([string]$GameDir)
+    if ([string]::IsNullOrWhiteSpace($GameDir)) { return $null }
+    $xml = Join-Path $GameDir '__Installer\installerdata.xml'
+    if (-not [System.IO.File]::Exists($xml)) { return $null }
+    try { $text = [System.IO.File]::ReadAllText($xml) } catch { return $null }
+    $m = [regex]::Match($text, '(?i)<gameVersion\s+version="([^"]+)"')
+    if ($m.Success) { return $m.Groups[1].Value } else { return $null }
+}
+
+# The OneGamers downgrade is done once the installed version matches the target.
+function Test-Fc27Downgraded {
+    param([string]$GameDir)
+    return ((Get-Fc27InstalledVersion -GameDir $GameDir) -eq $script:TargetVersion)
+}
+
+# True while the game process holds its files open.
+function Test-Fc27GameRunning {
+    try { return [bool](Get-Process -Name $script:GameExe -ErrorAction SilentlyContinue) }
+    catch { return $false }
+}
+
+# Returns the license token if the .dlf exists AND decrypts to a real GameToken;
+# otherwise $null (e.g. a freshly-created but token-less .dlf).
+function Get-Fc27ReadyToken {
+    param([string]$LicensePath)
+    if (-not [System.IO.File]::Exists($LicensePath)) { return $null }
+    try { return (Get-LicenseToken -Data ([System.IO.File]::ReadAllBytes($LicensePath))) }
+    catch { return $null }
 }
 
 function Write-AtomicFile {
@@ -504,32 +547,61 @@ function Set-Fc27Log {
     $script:UI.LogText.Text = $Text
 }
 
-function Set-Fc27Step {
-    param([int]$Index, [string]$State)  # done | active | pending
-    $circle = $script:UI["S$($Index)Circle"]
-    $num = $script:UI["S$($Index)Num"]
-    switch ($State) {
-        'done' {
-            $circle.Background = New-Fc27Brush '#5C9412'
-            $num.Text = [string][char]0xE73E
-            $num.FontFamily = 'Segoe MDL2 Assets'
-            $num.FontSize = 14
-            $num.Foreground = New-Fc27Brush '#FFFFFF'
-        }
-        'active' {
-            $circle.Background = New-Fc27Brush '#1A72C4'
-            $num.Text = "$Index"
-            $num.FontFamily = 'Segoe UI'
-            $num.FontSize = 15
-            $num.Foreground = New-Fc27Brush '#FFFFFF'
-        }
-        default {
-            $circle.Background = New-Fc27Brush '#22344A'
-            $num.Text = "$Index"
-            $num.FontFamily = 'Segoe UI'
-            $num.FontSize = 15
-            $num.Foreground = New-Fc27Brush '#8CA0B3'
-        }
+# Build the onboarding checklist rows once; states are updated per refresh.
+$script:CheckRows = @()
+function Build-Fc27Checklist {
+    $panel = $script:UI.Checklist
+    $panel.Children.Clear()
+    $script:CheckRows = @()
+    foreach ($label in @(
+            'EA SPORTS FC 27 installed via Steam',
+            'Downgraded to version 1.0.140.52122 (OneGamers key)',
+            'License token generated (launch the game once)',
+            'Game closed')) {
+        $row = New-Object System.Windows.Controls.StackPanel
+        $row.Orientation = 'Horizontal'
+        $row.Margin = New-Object System.Windows.Thickness(0, 0, 0, 12)
+        $icon = New-Object System.Windows.Controls.TextBlock
+        $icon.FontSize = 16; $icon.Width = 26; $icon.VerticalAlignment = 'Center'
+        $lbl = New-Object System.Windows.Controls.TextBlock
+        $lbl.FontSize = 13; $lbl.VerticalAlignment = 'Center'; $lbl.Text = $label
+        [void]$row.Children.Add($icon)
+        [void]$row.Children.Add($lbl)
+        [void]$panel.Children.Add($row)
+        $script:CheckRows += [pscustomobject]@{ Icon = $icon; Label = $lbl }
+    }
+}
+
+function Set-Fc27Check {
+    param([int]$Index, [bool]$Done, [bool]$Active)
+    if ($Index -ge $script:CheckRows.Count) { return }
+    $row = $script:CheckRows[$Index]
+    if ($Done) {
+        $row.Icon.Text = [string][char]0x2713   # check
+        $row.Icon.Foreground = New-Fc27Brush '#8ED629'
+        $row.Label.Foreground = New-Fc27Brush '#8FA3B5'
+    }
+    elseif ($Active) {
+        $row.Icon.Text = [string][char]0x25B6   # play arrow
+        $row.Icon.Foreground = New-Fc27Brush '#66C0F4'
+        $row.Label.Foreground = New-Fc27Brush '#EAF2F8'
+    }
+    else {
+        $row.Icon.Text = [string][char]0x25CB   # hollow circle
+        $row.Icon.Foreground = New-Fc27Brush '#4A5D70'
+        $row.Label.Foreground = New-Fc27Brush '#7E93A6'
+    }
+}
+
+function Set-Fc27Primary {
+    param([string]$Text, [string]$Url)
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        $script:UI.BtnPrimary.Visibility = 'Collapsed'
+    }
+    else {
+        $script:UI.BtnPrimary.Visibility = 'Visible'
+        $script:UI.BtnPrimary.Content = $Text
+        $script:PrimaryUrl = $Url
     }
 }
 
@@ -618,7 +690,6 @@ function Show-Fc27PlayDialog {
 }
 
 function Update-Fc27Gate {
-    $licenseExists = [System.IO.File]::Exists($script:LicensePath)
     $state = Get-SteamAppState -AppId $script:AppId
 
     # Keep the game folder pointed at the detected Steam install (unless the user
@@ -631,53 +702,74 @@ function Update-Fc27Gate {
         }
     }
 
-    # Once the game is installed but not yet patched, fetch + extract the crack.
+    # Evaluate every precondition.
+    $installed = $state.GameInstalled -and $script:GameDir -and (Test-Path -LiteralPath $script:GameDir)
+    $downgraded = $installed -and (Test-Fc27Downgraded -GameDir $script:GameDir)
+    $tokenReady = [bool](Get-Fc27ReadyToken -LicensePath $script:LicensePath)
+    $running = Test-Fc27GameRunning
+    $patched = Test-Fc27HasConfigs $script:GameDir
+
+    # Start the patch as soon as every precondition holds (guarded internally).
     Start-Fc27Patch
 
-    if ($licenseExists) {
+    # Done: patch installed and token available -> apply automatically, once.
+    if ($patched -and $tokenReady) {
         $script:UI.PanelOnboard.Visibility = 'Collapsed'
         $script:UI.PanelTools.Visibility = 'Visible'
-        Set-Fc27Banner 'ok' 'License detected' 'The license file 16425884_sc.dlf was found; the token is applied automatically.'
+        Set-Fc27Banner 'ok' 'Ready to play' 'Patch installed and license detected. The token is applied automatically.'
         Test-Fc27Configs
-        # Auto-apply the token the moment the license and configs are both present
-        # (no button click needed), exactly once.
-        if ((-not $script:AutoTokenDone) -and $script:WindowShown -and (Test-Fc27HasConfigs $script:GameDir)) {
+        if ((-not $script:AutoTokenDone) -and $script:WindowShown) {
             $script:AutoTokenDone = $true
             [void](Invoke-Fc27TokenApply -Manual $false)
         }
         return
     }
 
+    # Otherwise show the checklist and guide the current step.
     $script:UI.PanelTools.Visibility = 'Collapsed'
     $script:UI.PanelOnboard.Visibility = 'Visible'
 
+    Set-Fc27Check 0 $installed (-not $installed)
+    Set-Fc27Check 1 $downgraded ($installed -and (-not $downgraded))
+    Set-Fc27Check 2 $tokenReady ($installed -and $downgraded -and (-not $tokenReady))
+    Set-Fc27Check 3 (-not $running) ($installed -and $downgraded -and $tokenReady -and $running)
+
     if (-not $state.SteamInstalled) {
-        Set-Fc27Step 1 'active'; Set-Fc27Step 2 'pending'; Set-Fc27Step 3 'pending'
         Set-Fc27Banner 'warn' 'Steam not detected' 'Steam does not appear to be installed. Opening the store in your browser instead.'
-        $script:UI.BtnPrimary.Content = 'Open store in browser'
-        $script:PrimaryUrl = $script:StoreWebUrl
-        $script:UI.PrimaryHint.Text = 'Install Steam and add FC27, then click Re-check.'
+        Set-Fc27Primary 'Open store in browser' $script:StoreWebUrl
+        $script:UI.PrimaryHint.Text = 'Install Steam and add FC27, then it continues automatically.'
     }
     elseif (-not $state.InLibrary) {
-        Set-Fc27Step 1 'active'; Set-Fc27Step 2 'pending'; Set-Fc27Step 3 'pending'
         Set-Fc27Banner 'info' 'FC27 is not in your library' 'Add EA SPORTS FC 27 (appid 4407750) to your Steam library first.'
-        $script:UI.BtnPrimary.Content = 'Open FC27 store page'
-        $script:PrimaryUrl = $script:StoreUrl
-        $script:UI.PrimaryHint.Text = 'Add the game to your library in Steam, then click Re-check.'
+        Set-Fc27Primary 'Open FC27 store page' $script:StoreUrl
+        $script:UI.PrimaryHint.Text = 'Add the game to your library in Steam.'
     }
-    elseif (-not $state.GameInstalled) {
-        Set-Fc27Step 1 'done'; Set-Fc27Step 2 'active'; Set-Fc27Step 3 'pending'
+    elseif (-not $installed) {
         Set-Fc27Banner 'info' 'FC27 is not installed' 'The game is in your library but not installed yet.'
-        $script:UI.BtnPrimary.Content = 'Install FC27'
-        $script:PrimaryUrl = $script:InstallUrl
-        $script:UI.PrimaryHint.Text = 'Finish the Steam download/install, then click Re-check.'
+        Set-Fc27Primary 'Install FC27' $script:InstallUrl
+        $script:UI.PrimaryHint.Text = 'Finish the Steam download/install.'
+    }
+    elseif (-not $downgraded) {
+        $cur = Get-Fc27InstalledVersion -GameDir $script:GameDir
+        $curText = if ($cur) { "Current version: $cur." } else { 'Current version could not be read.' }
+        Set-Fc27Banner 'info' 'Downgrade required' "Activate your OneGamers key and downgrade to $($script:TargetVersion). $curText"
+        Set-Fc27Primary '' ''
+        $script:UI.PrimaryHint.Text = "Use your OneGamers key to downgrade to version $($script:TargetVersion). This window continues on its own once the version matches."
+    }
+    elseif (-not $tokenReady) {
+        Set-Fc27Banner 'warn' 'Generate your license' 'Launch the game once and reach the main menu so the license token is written into 16425884_sc.dlf, then close the game.'
+        Set-Fc27Primary 'Launch FC27' $script:RunUrl
+        $script:UI.PrimaryHint.Text = 'Play once to the main menu, then close the game. The patch installs itself afterwards.'
+    }
+    elseif ($running) {
+        Set-Fc27Banner 'warn' 'Close the game' 'Everything is ready except the game is still running. Close FC27 so the patch can be installed.'
+        Set-Fc27Primary '' ''
+        $script:UI.PrimaryHint.Text = 'Close FC27 (FC27_Showcase.exe). The patch installs automatically once it is closed.'
     }
     else {
-        Set-Fc27Step 1 'done'; Set-Fc27Step 2 'done'; Set-Fc27Step 3 'active'
-        Set-Fc27Banner 'warn' 'Launch the game once' 'FC27 is installed but has not created the license file yet. Play it once so 16425884_sc.dlf is generated.'
-        $script:UI.BtnPrimary.Content = 'Launch FC27'
-        $script:PrimaryUrl = $script:RunUrl
-        $script:UI.PrimaryHint.Text = 'Start the game and reach the main menu, then click Re-check (this window also refreshes automatically).'
+        Set-Fc27Banner 'info' 'Installing patch' 'All steps complete - preparing the patch...'
+        Set-Fc27Primary '' ''
+        $script:UI.PrimaryHint.Text = 'Installing the patch...'
     }
 }
 
@@ -711,12 +803,14 @@ function Invoke-Fc27TokenApply {
 # yet patched. Idempotent - runs at most once per session.
 function Start-Fc27Patch {
     if ($script:PatchStarted) { return }
-    # IMPORTANT: only patch AFTER the game has generated its license on first
-    # launch. Extracting the crack earlier overwrites the files that create
-    # 16425884_sc.dlf, so wait until the .dlf exists.
-    if (-not [System.IO.File]::Exists($script:LicensePath)) { return }
-    if (Test-Fc27HasConfigs $script:GameDir) { return }   # already patched
-    if ([string]::IsNullOrWhiteSpace($script:GameDir) -or -not (Test-Path -LiteralPath $script:GameDir)) { return }  # game not installed yet
+    # Every precondition must hold before we download or extract anything, or we
+    # race the steps that must come first (token generation, downgrade) and
+    # overwrite files the game still has open.
+    if ([string]::IsNullOrWhiteSpace($script:GameDir) -or -not (Test-Path -LiteralPath $script:GameDir)) { return }  # not installed
+    if (Test-Fc27HasConfigs $script:GameDir) { return }                       # already patched
+    if (-not (Test-Fc27Downgraded -GameDir $script:GameDir)) { return }       # OneGamers downgrade not done
+    if (-not (Get-Fc27ReadyToken -LicensePath $script:LicensePath)) { return } # .dlf has no token yet (play first)
+    if (Test-Fc27GameRunning) { return }                                      # game still open
 
     $script:PatchStarted = $true
     $steam = Get-SteamPath
@@ -728,7 +822,7 @@ function Start-Fc27Patch {
     $rs.Open()
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
-    [void]$ps.AddScript($script:PatchWorker.ToString()).AddArgument($script:PatchState).AddArgument($script:GameDir).AddArgument($steam).AddArgument($script:PatchZipUrl)
+    [void]$ps.AddScript($script:PatchWorker.ToString()).AddArgument($script:PatchState).AddArgument($script:GameDir).AddArgument($steam).AddArgument($script:PatchZipUrl).AddArgument($script:GameExe)
 
     $script:PatchRunspace = $rs
     $script:PatchPS = $ps
@@ -989,46 +1083,13 @@ function Show-Gui {
         <!-- ===== ONBOARDING ===== -->
         <StackPanel x:Name="PanelOnboard" Visibility="Collapsed">
           <TextBlock TextWrapping="Wrap" FontSize="13" Foreground="#9FB2C4" Margin="0,0,0,16"
-                     Text="The license file 16425884_sc.dlf is missing. It is created by EA / Windows only after FC27 is owned, installed, and launched at least once. Follow the steps below, then use Re-check."/>
+                     Text="Complete the steps below. The patch installs itself automatically the moment all of them are done - this window keeps checking, so you can leave it open."/>
 
-          <!-- Step 1 -->
-          <Grid Margin="0,0,0,14">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="46"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-            <Border x:Name="S1Circle" Grid.Column="0" Width="34" Height="34" CornerRadius="17" Background="#22344A" VerticalAlignment="Top">
-              <TextBlock x:Name="S1Num" Text="1" FontWeight="Bold" FontSize="15" Foreground="#C7D5E0" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-            </Border>
-            <StackPanel Grid.Column="1" VerticalAlignment="Center">
-              <TextBlock x:Name="S1Title" Text="Add FC27 to your Steam library" FontSize="14" FontWeight="SemiBold" Foreground="#EAF2F8"/>
-              <TextBlock x:Name="S1Desc" Text="Own the game on Steam (appid 4407750)." FontSize="12" Foreground="#7E93A6" TextWrapping="Wrap" Margin="0,2,0,0"/>
-            </StackPanel>
-          </Grid>
+          <!-- Checklist rows are built in code -->
+          <StackPanel x:Name="Checklist" Margin="2,0,0,8"/>
 
-          <!-- Step 2 -->
-          <Grid Margin="0,0,0,14">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="46"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-            <Border x:Name="S2Circle" Grid.Column="0" Width="34" Height="34" CornerRadius="17" Background="#22344A" VerticalAlignment="Top">
-              <TextBlock x:Name="S2Num" Text="2" FontWeight="Bold" FontSize="15" Foreground="#C7D5E0" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-            </Border>
-            <StackPanel Grid.Column="1" VerticalAlignment="Center">
-              <TextBlock x:Name="S2Title" Text="Install the game" FontSize="14" FontWeight="SemiBold" Foreground="#EAF2F8"/>
-              <TextBlock x:Name="S2Desc" Text="Download and install FC27 through Steam." FontSize="12" Foreground="#7E93A6" TextWrapping="Wrap" Margin="0,2,0,0"/>
-            </StackPanel>
-          </Grid>
-
-          <!-- Step 3 -->
-          <Grid Margin="0,0,0,10">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="46"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-            <Border x:Name="S3Circle" Grid.Column="0" Width="34" Height="34" CornerRadius="17" Background="#22344A" VerticalAlignment="Top">
-              <TextBlock x:Name="S3Num" Text="3" FontWeight="Bold" FontSize="15" Foreground="#C7D5E0" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-            </Border>
-            <StackPanel Grid.Column="1" VerticalAlignment="Center">
-              <TextBlock x:Name="S3Title" Text="Launch the game once" FontSize="14" FontWeight="SemiBold" Foreground="#EAF2F8"/>
-              <TextBlock x:Name="S3Desc" Text="Play to the main menu so the license file is written, then come back." FontSize="12" Foreground="#7E93A6" TextWrapping="Wrap" Margin="0,2,0,0"/>
-            </StackPanel>
-          </Grid>
-
-          <Button x:Name="BtnPrimary" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Margin="46,10,0,4" Content="Open Steam Store"/>
-          <TextBlock x:Name="PrimaryHint" Margin="46,4,0,0" FontSize="12" Foreground="#7E93A6" TextWrapping="Wrap"
+          <Button x:Name="BtnPrimary" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Margin="2,10,0,4" Content="Open Steam Store"/>
+          <TextBlock x:Name="PrimaryHint" Margin="2,4,0,0" FontSize="12" Foreground="#7E93A6" TextWrapping="Wrap"
                      Text="After completing the step, click Re-check below."/>
         </StackPanel>
 
@@ -1100,7 +1161,7 @@ function Show-Gui {
 
     $UI = @{}
     foreach ($name in @('BannerBorder', 'BannerIcon', 'BannerTitle', 'BannerDetail',
-            'PanelOnboard', 'S1Circle', 'S1Num', 'S2Circle', 'S2Num', 'S3Circle', 'S3Num',
+            'PanelOnboard', 'Checklist',
             'BtnPrimary', 'PrimaryHint',
             'PanelTools', 'TxtGameDir', 'BtnBrowse', 'ConfigWarn',
             'ChkCopyToken', 'BtnToken', 'LogText', 'BtnRecheck',
@@ -1118,6 +1179,8 @@ function Show-Gui {
     $script:GameDir = $GameDir
     $script:LicensePath = $LicensePath
     $UI.TxtGameDir.Text = $script:GameDir
+
+    Build-Fc27Checklist
 
     # ---- event wiring (handlers use script-scoped state + functions) ------
     $UI.BtnPrimary.Add_Click({ Open-Fc27Url $script:PrimaryUrl })
